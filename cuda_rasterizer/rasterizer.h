@@ -42,13 +42,19 @@ namespace CudaRasterizer
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,
+			const float* rotations2,
 			const float* cov3D_precomp,
 			const float* viewmatrix,
 			const float* projmatrix,
 			const float* cam_pos,
 			const float tan_fovx, float tan_fovy,
+			const float cx, const float cy,
 			const bool prefiltered,
+			const bool computer_xyz,
 			float* out_color,
+			float* out_opacity,
+			float* out_depth,
+			float* out_surface_xyz,
 			int* radii = nullptr,
 			bool debug = false);
 
@@ -62,6 +68,7 @@ namespace CudaRasterizer
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,
+			const float* rotations2,
 			const float* cov3D_precomp,
 			const float* viewmatrix,
 			const float* projmatrix,
@@ -72,6 +79,8 @@ namespace CudaRasterizer
 			char* binning_buffer,
 			char* image_buffer,
 			const float* dL_dpix,
+			const float* dL_dpix_o,
+			const float* dL_dpix_d,
 			float* dL_dmean2D,
 			float* dL_dconic,
 			float* dL_dopacity,
@@ -81,6 +90,7 @@ namespace CudaRasterizer
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
+			float* dL_drot2,
 			bool debug);
 	};
 };

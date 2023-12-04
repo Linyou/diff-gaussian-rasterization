@@ -209,13 +209,19 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* scales,
 	const float scale_modifier,
 	const float* rotations,
+	const float* rotations2,
 	const float* cov3D_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const float* cam_pos,
 	const float tan_fovx, float tan_fovy,
+	const float cx, const float cy,
 	const bool prefiltered,
+	const bool computer_xyz,
 	float* out_color,
+	float* out_opacity,
+	float* out_depth,
+	float* out_surface_xyz,
 	int* radii,
 	bool debug)
 {
@@ -251,6 +257,7 @@ int CudaRasterizer::Rasterizer::forward(
 		(glm::vec3*)scales,
 		scale_modifier,
 		(glm::vec4*)rotations,
+		(glm::vec4*)rotations2,
 		opacities,
 		shs,
 		geomState.clamped,
@@ -325,12 +332,29 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.point_list,
 		width, height,
 		geomState.means2D,
+		geomState.depths,
 		feature_ptr,
 		geomState.conic_opacity,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
-		out_color), debug)
+		out_color,
+		out_opacity,
+		out_depth), debug)
+
+    if (computer_xyz){
+        CHECK_CUDA(FORWARD::render_xyz(
+            tile_grid, block,
+            width, height,
+            viewmatrix,
+            focal_x, focal_y,
+            cx, cy,
+            tan_fovx, tan_fovy,
+            out_opacity,
+            out_depth,
+            out_surface_xyz
+            ), debug)
+    }
 
 	return num_rendered;
 }
@@ -347,6 +371,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* scales,
 	const float scale_modifier,
 	const float* rotations,
+	const float* rotations2,
 	const float* cov3D_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
@@ -357,6 +382,8 @@ void CudaRasterizer::Rasterizer::backward(
 	char* binning_buffer,
 	char* img_buffer,
 	const float* dL_dpix,
+	const float* dL_dpix_o,
+	const float* dL_dpix_d,
 	float* dL_dmean2D,
 	float* dL_dconic,
 	float* dL_dopacity,
@@ -366,6 +393,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
+	float* dL_drot2,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
@@ -395,11 +423,14 @@ void CudaRasterizer::Rasterizer::backward(
 		width, height,
 		background,
 		geomState.means2D,
+		geomState.depths,
 		geomState.conic_opacity,
 		color_ptr,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		dL_dpix,
+        dL_dpix_o,
+        dL_dpix_d,
 		(float3*)dL_dmean2D,
 		(float4*)dL_dconic,
 		dL_dopacity,
@@ -416,6 +447,7 @@ void CudaRasterizer::Rasterizer::backward(
 		geomState.clamped,
 		(glm::vec3*)scales,
 		(glm::vec4*)rotations,
+		(glm::vec4*)rotations2,
 		scale_modifier,
 		cov3D_ptr,
 		viewmatrix,
@@ -430,5 +462,6 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dcov3D,
 		dL_dsh,
 		(glm::vec3*)dL_dscale,
-		(glm::vec4*)dL_drot), debug)
+		(glm::vec4*)dL_drot,
+		(glm::vec4*)dL_drot2), debug)
 }

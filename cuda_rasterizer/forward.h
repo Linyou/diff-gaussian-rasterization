@@ -26,6 +26,7 @@ namespace FORWARD
 		const glm::vec3* scales,
 		const float scale_modifier,
 		const glm::vec4* rotations,
+		const glm::vec4* rotations2,
 		const float* opacities,
 		const float* shs,
 		bool* clamped,
@@ -54,12 +55,27 @@ namespace FORWARD
 		const uint32_t* point_list,
 		int W, int H,
 		const float2* points_xy_image,
+		const float* depths,
 		const float* features,
 		const float4* conic_opacity,
 		float* final_T,
 		uint32_t* n_contrib,
 		const float* bg_color,
-		float* out_color);
+		float* out_color,
+		float* out_opacity,
+		float* out_depth);
+
+	void render_xyz(
+        const dim3 grid, dim3 block,
+		const int W, const int H,
+		const float* viewmatrix,
+		const float focal_x, const float focal_y,
+		const float cx, const float cy,
+		const float tan_fovx, const float tan_fovy,
+		const float* opacities,
+		const float* depths,
+		float* surface_xyz);
+
 }
 
 

@@ -289,7 +289,6 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
 		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
 	);
-
 	glm::mat3 S = glm::mat3(1.0f);
 
 	glm::vec3 s = mod * scale;
@@ -340,6 +339,110 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
 }
 
+// Backward pass for the conversion of scale and rotation to a 
+// 3D covariance matrix for each Gaussian. 
+__device__ void computeCov3D2(int idx, const glm::vec3 scale, float mod, const glm::vec4 rot, const glm::vec4 rot2, const float* dL_dcov3Ds, glm::vec3* dL_dscales, glm::vec4* dL_drots, glm::vec4* dL_drots2)
+{
+	// Recompute (intermediate) results for the 3D covariance computation.
+	glm::vec4 q = rot;// / glm::length(rot);
+	float r = q.x;
+	float x = q.y;
+	float y = q.z;
+	float z = q.w;
+
+	glm::vec4 q2 = rot2;// / glm::length(rot);
+	float r2 = q2.x;
+	float x2 = q2.y;
+	float y2 = q2.z;
+	float z2 = q2.w;
+
+	glm::mat3 R = glm::mat3(
+		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
+	);
+
+	glm::mat3 R2 = glm::mat3(
+		1.f - 2.f * (y2 * y2 + z2 * z2), 2.f * (x2 * y2 - r2 * z2), 2.f * (x2 * z2 + r2 * y2),
+		2.f * (x2 * y2 + r2 * z2), 1.f - 2.f * (x2 * x2 + z2 * z2), 2.f * (y2 * z2 - r2 * x2),
+		2.f * (x2 * z2 - r2 * y2), 2.f * (y2 * z2 + r2 * x2), 1.f - 2.f * (x2 * x2 + y2 * y2)
+	);
+
+	glm::mat3 S = glm::mat3(1.0f);
+
+	glm::vec3 s = mod * scale;
+	S[0][0] = s.x;
+	S[1][1] = s.y;
+	S[2][2] = s.z;
+
+
+	glm::mat3 RR = R * R2;
+	glm::mat3 M = S * RR;
+
+	const float* dL_dcov3D = dL_dcov3Ds + 6 * idx;
+
+	glm::vec3 dunc(dL_dcov3D[0], dL_dcov3D[3], dL_dcov3D[5]);
+	glm::vec3 ounc = 0.5f * glm::vec3(dL_dcov3D[1], dL_dcov3D[2], dL_dcov3D[4]);
+
+	// Convert per-element covariance loss gradients to matrix form
+	glm::mat3 dL_dSigma = glm::mat3(
+		dL_dcov3D[0], 0.5f * dL_dcov3D[1], 0.5f * dL_dcov3D[2],
+		0.5f * dL_dcov3D[1], dL_dcov3D[3], 0.5f * dL_dcov3D[4],
+		0.5f * dL_dcov3D[2], 0.5f * dL_dcov3D[4], dL_dcov3D[5]
+	);
+
+	// Compute loss gradient w.r.t. matrix M
+	// dSigma_dM = 2 * M
+	glm::mat3 dL_dM = 2.0f * M * dL_dSigma;
+
+	glm::mat3 Rt = glm::transpose(R);
+	glm::mat3 R2t = glm::transpose(R2);
+	glm::mat3 RRt = glm::transpose(RR);
+	glm::mat3 dL_dMt = glm::transpose(dL_dM);
+
+	// Gradients of loss w.r.t. scale
+	glm::vec3* dL_dscale = dL_dscales + idx;
+	dL_dscale->x = glm::dot(RRt[0], dL_dMt[0]);
+	dL_dscale->y = glm::dot(RRt[1], dL_dMt[1]);
+	dL_dscale->z = glm::dot(RRt[2], dL_dMt[2]);
+
+	dL_dMt[0] *= s.x;
+	dL_dMt[1] *= s.y;
+	dL_dMt[2] *= s.z;
+
+	glm::mat3 dL_dR = glm::mat3(1.0f);
+	dL_dR[0] = dL_dMt[0] * R2t[0];
+	dL_dR[1] = dL_dMt[1] * R2t[1];
+	dL_dR[2] = dL_dMt[2] * R2t[2];
+
+	// Gradients of loss w.r.t. normalized quaternion
+	glm::vec4 dL_dq;
+	dL_dq.x = 2 * z * (dL_dR[0][1] - dL_dR[1][0]) + 2 * y * (dL_dR[2][0] - dL_dR[0][2]) + 2 * x * (dL_dR[1][2] - dL_dR[2][1]);
+	dL_dq.y = 2 * y * (dL_dR[1][0] + dL_dR[0][1]) + 2 * z * (dL_dR[2][0] + dL_dR[0][2]) + 2 * r * (dL_dR[1][2] - dL_dR[2][1]) - 4 * x * (dL_dR[2][2] + dL_dR[1][1]);
+	dL_dq.z = 2 * x * (dL_dR[1][0] + dL_dR[0][1]) + 2 * r * (dL_dR[2][0] - dL_dR[0][2]) + 2 * z * (dL_dR[1][2] + dL_dR[2][1]) - 4 * y * (dL_dR[2][2] + dL_dR[0][0]);
+	dL_dq.w = 2 * r * (dL_dR[0][1] - dL_dR[1][0]) + 2 * x * (dL_dR[2][0] + dL_dR[0][2]) + 2 * y * (dL_dR[1][2] + dL_dR[2][1]) - 4 * z * (dL_dR[1][1] + dL_dR[0][0]);
+
+	glm::mat3 dL_dR2 = glm::mat3(1.0f);
+	dL_dR2[0] = dL_dMt[0] * Rt[0];
+	dL_dR2[1] = dL_dMt[1] * Rt[1];
+	dL_dR2[2] = dL_dMt[2] * Rt[2];
+
+	// Gradients of loss w.r.t. normalized quaternion
+	glm::vec4 dL_dq2;
+	dL_dq.x = 2 * z * (dL_dR2[0][1] - dL_dR2[1][0]) + 2 * y * (dL_dR2[2][0] - dL_dR2[0][2]) + 2 * x * (dL_dR2[1][2] - dL_dR2[2][1]);
+	dL_dq.y = 2 * y * (dL_dR2[1][0] + dL_dR2[0][1]) + 2 * z * (dL_dR2[2][0] + dL_dR2[0][2]) + 2 * r * (dL_dR2[1][2] - dL_dR2[2][1]) - 4 * x * (dL_dR2[2][2] + dL_dR2[1][1]);
+	dL_dq.z = 2 * x * (dL_dR2[1][0] + dL_dR2[0][1]) + 2 * r * (dL_dR2[2][0] - dL_dR2[0][2]) + 2 * z * (dL_dR2[1][2] + dL_dR2[2][1]) - 4 * y * (dL_dR2[2][2] + dL_dR2[0][0]);
+	dL_dq.w = 2 * r * (dL_dR2[0][1] - dL_dR2[1][0]) + 2 * x * (dL_dR2[2][0] + dL_dR2[0][2]) + 2 * y * (dL_dR2[1][2] + dL_dR2[2][1]) - 4 * z * (dL_dR2[1][1] + dL_dR2[0][0]);
+
+	// Gradients of loss w.r.t. unnormalized quaternion
+	float4* dL_drot = (float4*)(dL_drots + idx);
+	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
+
+	// Gradients of loss w.r.t. unnormalized quaternion
+	float4* dL_drot2 = (float4*)(dL_drots2 + idx);
+	*dL_drot2 = float4{ dL_dq2.x, dL_dq2.y, dL_dq2.z, dL_dq2.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
+}
+
 // Backward pass of the preprocessing steps, except
 // for the covariance computation and inversion
 // (those are handled by a previous kernel call)
@@ -352,6 +455,7 @@ __global__ void preprocessCUDA(
 	const bool* clamped,
 	const glm::vec3* scales,
 	const glm::vec4* rotations,
+	const glm::vec4* rotations2,
 	const float scale_modifier,
 	const float* proj,
 	const glm::vec3* campos,
@@ -361,7 +465,8 @@ __global__ void preprocessCUDA(
 	float* dL_dcov3D,
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
-	glm::vec4* dL_drot)
+	glm::vec4* dL_drot,
+	glm::vec4* dL_drot2)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P || !(radii[idx] > 0))
@@ -392,7 +497,7 @@ __global__ void preprocessCUDA(
 
 	// Compute gradient updates due to computing covariance from scale/rotation
 	if (scales)
-		computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
+		computeCov3D2(idx, scales[idx], scale_modifier, rotations[idx], rotations2[idx], dL_dcov3D, dL_dscale, dL_drot, dL_drot2);
 }
 
 // Backward version of the rendering procedure.
@@ -404,11 +509,14 @@ renderCUDA(
 	int W, int H,
 	const float* __restrict__ bg_color,
 	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ depths,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ colors,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
+	const float* __restrict__ dL_dpixels_o,
+	const float* __restrict__ dL_dpixels_d,
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
@@ -564,6 +672,7 @@ void BACKWARD::preprocess(
 	const bool* clamped,
 	const glm::vec3* scales,
 	const glm::vec4* rotations,
+	const glm::vec4* rotations2,
 	const float scale_modifier,
 	const float* cov3Ds,
 	const float* viewmatrix,
@@ -578,7 +687,8 @@ void BACKWARD::preprocess(
 	float* dL_dcov3D,
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
-	glm::vec4* dL_drot)
+	glm::vec4* dL_drot,
+	glm::vec4* dL_drot2)
 {
 	// Propagate gradients for the path of 2D conic matrix computation. 
 	// Somewhat long, thus it is its own kernel rather than being part of 
@@ -609,6 +719,7 @@ void BACKWARD::preprocess(
 		clamped,
 		(glm::vec3*)scales,
 		(glm::vec4*)rotations,
+		(glm::vec4*)rotations2,
 		scale_modifier,
 		projmatrix,
 		campos,
@@ -618,7 +729,8 @@ void BACKWARD::preprocess(
 		dL_dcov3D,
 		dL_dsh,
 		dL_dscale,
-		dL_drot);
+		dL_drot,
+		dL_drot2);
 }
 
 void BACKWARD::render(
@@ -628,11 +740,14 @@ void BACKWARD::render(
 	int W, int H,
 	const float* bg_color,
 	const float2* means2D,
+	const float* depths,
 	const float4* conic_opacity,
 	const float* colors,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
+	const float* dL_dopacitys,
+	const float* dL_ddepths,
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
@@ -644,11 +759,14 @@ void BACKWARD::render(
 		W, H,
 		bg_color,
 		means2D,
+		depths,
 		conic_opacity,
 		colors,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
+		dL_dopacitys,
+		dL_ddepths,
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dopacity,

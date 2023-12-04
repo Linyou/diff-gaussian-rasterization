@@ -27,11 +27,14 @@ namespace BACKWARD
 		int W, int H,
 		const float* bg_color,
 		const float2* means2D,
+		const float* depths,
 		const float4* conic_opacity,
 		const float* colors,
 		const float* final_Ts,
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
+		const float* dL_dpixels_o,
+		const float* dL_dpixels_d,
 		float3* dL_dmean2D,
 		float4* dL_dconic2D,
 		float* dL_dopacity,
@@ -45,6 +48,7 @@ namespace BACKWARD
 		const bool* clamped,
 		const glm::vec3* scales,
 		const glm::vec4* rotations,
+		const glm::vec4* rotations2,
 		const float scale_modifier,
 		const float* cov3Ds,
 		const float* view,
@@ -59,7 +63,8 @@ namespace BACKWARD
 		float* dL_dcov3D,
 		float* dL_dsh,
 		glm::vec3* dL_dscale,
-		glm::vec4* dL_drot);
+		glm::vec4* dL_drot,
+		glm::vec4* dL_drot2);
 }
 
 #endif

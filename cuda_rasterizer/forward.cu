@@ -150,6 +150,54 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 	cov3D[4] = Sigma[1][2];
 	cov3D[5] = Sigma[2][2];
 }
+__device__ void computeCov3D2(const glm::vec3 scale, float mod, const glm::vec4 rot, const glm::vec4 rot2, float* cov3D)
+{
+	// Create scaling matrix
+	glm::mat3 S = glm::mat3(1.0f);
+	S[0][0] = mod * scale.x;
+	S[1][1] = mod * scale.y;
+	S[2][2] = mod * scale.z;
+
+	// Normalize quaternion to get valid rotation
+	glm::vec4 q = rot;// / glm::length(rot);
+	float r = q.x;
+	float x = q.y;
+	float y = q.z;
+	float z = q.w;
+
+	glm::vec4 q2 = rot2;// / glm::length(rot);
+	float r2 = q2.x;
+	float x2 = q2.y;
+	float y2 = q2.z;
+	float z2 = q2.w;
+
+	// Compute rotation matrix from quaternion
+	glm::mat3 R = glm::mat3(
+		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
+	);
+
+	// Compute rotation matrix from quaternion
+	glm::mat3 R2 = glm::mat3(
+		1.f - 2.f * (y2 * y2 + z2 * z2), 2.f * (x2 * y2 - r2 * z2), 2.f * (x2 * z2 + r2 * y2),
+		2.f * (x2 * y2 + r2 * z2), 1.f - 2.f * (x2 * x2 + z2 * z2), 2.f * (y2 * z2 - r2 * x2),
+		2.f * (x2 * z2 - r2 * y2), 2.f * (y2 * z2 + r2 * x2), 1.f - 2.f * (x2 * x2 + y2 * y2)
+	);
+
+	glm::mat3 M = S * R * R2;
+
+	// Compute 3D world covariance matrix Sigma
+	glm::mat3 Sigma = glm::transpose(M) * M;
+
+	// Covariance is symmetric, only store upper right
+	cov3D[0] = Sigma[0][0];
+	cov3D[1] = Sigma[0][1];
+	cov3D[2] = Sigma[0][2];
+	cov3D[3] = Sigma[1][1];
+	cov3D[4] = Sigma[1][2];
+	cov3D[5] = Sigma[2][2];
+}
 
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
@@ -158,6 +206,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const glm::vec3* scales,
 	const float scale_modifier,
 	const glm::vec4* rotations,
+	const glm::vec4* rotations2,
 	const float* opacities,
 	const float* shs,
 	bool* clamped,
@@ -208,7 +257,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 	else
 	{
-		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		computeCov3D2(scales[idx], scale_modifier, rotations[idx], rotations2[idx], cov3Ds + idx * 6);
 		cov3D = cov3Ds + idx * 6;
 	}
 
@@ -265,12 +314,15 @@ renderCUDA(
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ depths,
 	const float* __restrict__ features,
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
-	float* __restrict__ out_color)
+	float* __restrict__ out_color,
+	float* __restrict__ out_opacity,
+	float* __restrict__ out_depth)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -300,7 +352,7 @@ renderCUDA(
 	float T = 1.0f;
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
-	float C[CHANNELS] = { 0 };
+	float C[CHANNELS] = { 0 }, Depth = 0, Opacity = 0;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -350,9 +402,13 @@ renderCUDA(
 				continue;
 			}
 
+			float weight = alpha * T;
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+
+			Depth += depths[collected_id[j]] * weight;
+            Opacity += weight;
 
 			T = test_T;
 
@@ -370,8 +426,40 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+		out_depth[pix_id] = Depth;
+		out_opacity[pix_id] = Opacity;
 	}
 }
+
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+renderSurfaceXYZCUDA(
+    const int W, const int H,
+    const float* viewmatrix,
+    const float focal_x, const float focal_y,
+    const float cx, const float cy,
+    const float tan_fovx, const float tan_fovy,
+    const float* __restrict__ opacities,
+    const float* __restrict__ depths,
+    float* __restrict__ surface_xyz)
+{
+	// Identify current tile and associated min/max pixel range.
+	auto block = cg::this_thread_block();
+	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	// Check if this thread is associated with a valid pixel or outside.
+	bool inside = pix.x < W&& pix.y < H;
+    if (!inside) return;
+	uint32_t pix_id = W * pix.y + pix.x;
+    uint32_t HW = H * W;
+	float depth = depths[pix_id] / fmaxf(opacities[pix_id], 0.0000001f);
+// 	float depth = depths[pix_id];
+    surface_xyz[pix_id] =  (pix.x - cx) / focal_x * depth;
+    surface_xyz[HW + pix_id] = (pix.y - cy) / focal_y * depth;
+    surface_xyz[2 * HW + pix_id] = depth;
+}
+
+
 
 void FORWARD::render(
 	const dim3 grid, dim3 block,
@@ -379,31 +467,61 @@ void FORWARD::render(
 	const uint32_t* point_list,
 	int W, int H,
 	const float2* means2D,
+	const float* depths,
 	const float* colors,
 	const float4* conic_opacity,
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
-	float* out_color)
+	float* out_color,
+	float* out_opacity,
+	float* out_depth)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
 		W, H,
 		means2D,
+		depths,
 		colors,
 		conic_opacity,
 		final_T,
 		n_contrib,
 		bg_color,
-		out_color);
+		out_color,
+		out_opacity,
+		out_depth);
 }
+
+void FORWARD::render_xyz(
+	const dim3 grid, dim3 block,
+	const int W, const int H,
+    const float* viewmatrix,
+    const float focal_x, const float focal_y,
+    const float cx, const float cy,
+    const float tan_fovx, const float tan_fovy,
+    const float* opacities,
+    const float* depths,
+    float* surface_xyz)
+{
+	renderSurfaceXYZCUDA << <grid, block >> > (
+		W, H,
+        viewmatrix,
+        focal_x, focal_y,
+        cx, cy,
+        tan_fovx, tan_fovy,
+        opacities,
+        depths,
+        surface_xyz);
+}
+
 
 void FORWARD::preprocess(int P, int D, int M,
 	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
 	const glm::vec4* rotations,
+	const glm::vec4* rotations2,
 	const float* opacities,
 	const float* shs,
 	bool* clamped,
@@ -431,6 +549,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		scales,
 		scale_modifier,
 		rotations,
+		rotations2,
 		opacities,
 		shs,
 		clamped,
