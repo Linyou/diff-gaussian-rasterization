@@ -26,6 +26,7 @@ def rasterize_gaussians(
     opacities,
     scales,
     rotations,
+    # rotations2,
     cov3Ds_precomp,
     raster_settings,
 ):
@@ -37,6 +38,7 @@ def rasterize_gaussians(
         opacities,
         scales,
         rotations,
+        # rotations2,
         cov3Ds_precomp,
         raster_settings,
     )
@@ -52,6 +54,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         opacities,
         scales,
         rotations,
+        # rotations2,
         cov3Ds_precomp,
         raster_settings,
     ):
@@ -64,18 +67,22 @@ class _RasterizeGaussians(torch.autograd.Function):
             opacities,
             scales,
             rotations,
+            # rotations2,
             raster_settings.scale_modifier,
             cov3Ds_precomp,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
             raster_settings.tanfovx,
             raster_settings.tanfovy,
+            raster_settings.image_width//2,
+            raster_settings.image_height//2,
             raster_settings.image_height,
             raster_settings.image_width,
             sh,
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
+            raster_settings.computer_xyz,
             raster_settings.debug
         )
 
@@ -83,22 +90,22 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
+                num_rendered, color, opacity, depth, render_xyz, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
+            num_rendered, color, opacity, depth, render_xyz, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
-        return color, radii
+        return num_rendered, color, opacity, depth, render_xyz, radii
 
     @staticmethod
-    def backward(ctx, grad_out_color, _):
+    def backward(ctx, grad_num_rendered, grad_out_color, grad_out_opacity, grad_out_depth, grad_xyz, _):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
@@ -112,6 +119,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 colors_precomp, 
                 scales, 
                 rotations, 
+                # rotations2,
                 raster_settings.scale_modifier, 
                 cov3Ds_precomp, 
                 raster_settings.viewmatrix, 
@@ -119,6 +127,8 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raster_settings.tanfovx, 
                 raster_settings.tanfovy, 
                 grad_out_color, 
+                grad_out_opacity,
+                grad_out_depth,
                 sh, 
                 raster_settings.sh_degree, 
                 raster_settings.campos,
@@ -132,7 +142,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
+                grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations, grad_rotations2 = _C.rasterize_gaussians_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
@@ -148,6 +158,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_opacities,
             grad_scales,
             grad_rotations,
+            # grad_rotations2,
             grad_cov3Ds_precomp,
             None,
         )
@@ -166,6 +177,7 @@ class GaussianRasterizationSettings(NamedTuple):
     sh_degree : int
     campos : torch.Tensor
     prefiltered : bool
+    computer_xyz : bool
     debug : bool
 
 class GaussianRasterizer(nn.Module):
@@ -184,7 +196,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, rotations2 = None, cov3D_precomp = None):
         
         raster_settings = self.raster_settings
 
@@ -203,6 +215,8 @@ class GaussianRasterizer(nn.Module):
             scales = torch.Tensor([])
         if rotations is None:
             rotations = torch.Tensor([])
+        # if rotations2 is None:
+        #     rotations2 = torch.Tensor([])
         if cov3D_precomp is None:
             cov3D_precomp = torch.Tensor([])
 
@@ -215,7 +229,7 @@ class GaussianRasterizer(nn.Module):
             opacities,
             scales, 
             rotations,
+            # rotations2,
             cov3D_precomp,
             raster_settings, 
         )
-
